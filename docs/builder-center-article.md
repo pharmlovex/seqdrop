@@ -24,6 +24,12 @@ I wanted a single place to drop a FASTQ or VCF and get three answers straight aw
 
 ## Architecture
 
+![SeqDrop client data flow: register, upload, process, query](architecture.png)
+
+A client only ever talks to two things: the API, to register a sample and later read the result, and S3, to upload the file. Everything between the upload and the result is event-driven. S3 tells EventBridge, EventBridge starts the workflow, and the workflow writes its results to DynamoDB and sends an SNS alert. Nothing on the backend polls or sits waiting.
+
+### Inside the workflow
+
 ![SeqDrop intake workflow in the Step Functions console](stepfunctions_graph.png)
 
 There are three ways out of the workflow:
