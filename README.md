@@ -26,6 +26,10 @@ flowchart LR
 
 ### Workflow states
 
+![SeqDrop intake state machine, exported from the Step Functions console](stepfunctions_graph.svg)
+
+Orange = Lambda; blue = DynamoDB and pink = SNS, both direct service integrations with no Lambda; every `Catch` edge leads to `RecordError`. Definition: [`infra/statemachine/intake.asl.json`](infra/statemachine/intake.asl.json).
+
 `ParseEvent → MarkProcessing → Validate → IsValid?`
 - **valid:** `ExtractMetadata → Promote → RecordValidated → NotifyValidated → ✅`
 - **invalid:** `Quarantine → RecordQuarantined → NotifyQuarantined → ✅`
@@ -59,10 +63,10 @@ Confirm the SNS subscription email if you set one.
 ## Demo
 
 ```bash
-scripts/demo.sh samples/good_R1.fastq.gz NA-demo-01       # → VALIDATED with metadata
-scripts/demo.sh samples/good_tumour_normal.vcf TN-pair-01  # → VALIDATED, 2 samples, SNV/indel split
-scripts/demo.sh samples/bad_length_mismatch.fastq          # → QUARANTINED: "Record 6: sequence length 75 != quality length 70"
-scripts/demo.sh samples/bad_corrupt.vcf.gz                 # → QUARANTINED: corrupt gzip
+src/scripts/demo.sh samples/good_R1.fastq.gz NA-demo-01       # → VALIDATED with metadata
+src/scripts/demo.sh samples/good_tumour_normal.vcf TN-pair-01  # → VALIDATED, 2 samples, SNV/indel split
+src/scripts/demo.sh samples/bad_length_mismatch.fastq          # → QUARANTINED: "Record 6: sequence length 75 != quality length 70"
+src/scripts/demo.sh samples/bad_corrupt.vcf.gz                 # → QUARANTINED: corrupt gzip
 ```
 
 API:

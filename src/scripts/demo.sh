@@ -6,7 +6,10 @@ set -euo pipefail
 
 FILE="${1:?usage: $0 <file> [sample_name]}"
 NAME="${2:-$(basename "$FILE")}"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Find the project root (the folder containing infra/) wherever this script lives.
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+while [ "$ROOT" != "/" ] && [ ! -d "$ROOT/infra" ]; do ROOT="$(dirname "$ROOT")"; done
+[ -d "$ROOT/infra" ] || { echo "Could not find infra/ above $(dirname "$0")"; exit 1; }
 API="${API_URL:-$(terraform -chdir="$ROOT/infra" output -raw api_url)}"
 
 echo "→ Registering $NAME"
