@@ -1,4 +1,4 @@
-# SeqDrop: a serverless front door for sequencing data
+#  SeqDrop: a serverless front door for sequencing data
 
 *Weekend Challenge: No Pipeline, No Problem. Seven serverless services (API Gateway, Lambda, S3, Step Functions, DynamoDB, EventBridge and SNS), one `terraform apply`, and nothing to manage afterwards.*
 
@@ -17,10 +17,12 @@ What I wanted was a front door: one place to drop a FASTQ or VCF that answers th
 5. The sample record is updated with status, checksums, metadata or rejection reason, and an SNS notification goes out.
 6. `GET /samples/{id}` returns the result, and `GET /samples?status=QUARANTINED` lists everything that needs attention.
 
-| Format | Validation | Metadata extracted |
-|---|---|---|
-| FASTQ / FASTQ.gz | 4-line records, `@`/`+` lines, valid bases, sequence length = quality length, Phred+33 range, gzip integrity | reads, total bases, read length min/max/mean, GC%, first read ID |
-| VCF / VCF.gz | `##fileformat=VCF`, 8 fixed `#CHROM` columns, consistent column count, integer POS, non-empty REF | variant count, VCF version, sample names, chromosomes, SNV/indel/other counts |
+
+| Format           | Validation                                                                                                   | Metadata extracted                                                            |
+| ---------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| FASTQ / FASTQ.gz | 4-line records, `@`/`+` lines, valid bases, sequence length = quality length, Phred+33 range, gzip integrity | reads, total bases, read length min/max/mean, GC%, first read ID              |
+| VCF / VCF.gz     | `##fileformat=VCF`, 8 fixed `#CHROM` columns, consistent column count, integer POS, non-empty REF            | variant count, VCF version, sample names, chromosomes, SNV/indel/other counts |
+
 
 ## Architecture
 
@@ -34,7 +36,7 @@ The workflow has two happy endings and one unhappy one:
 
 ## No pipeline, no problem
 
-There is nothing to run, patch or babysit. The whole stack (59 resources) goes up with a single `terraform apply` from a laptop, with no CI/CD pipeline, no containers and no instances. Once it's deployed:
+There is nothing to run, patch or babysit. The whole stack (60 resources) goes up with a single `terraform apply` from a laptop, with no CI/CD pipeline, no containers and no instances. Once it's deployed:
 
 - **Idle cost is effectively zero.** Lambda, Step Functions, API Gateway and pay-per-request DynamoDB bill only when a file arrives. Between uploads, the only cost is storage.
 - **Scaling is someone else's problem.** Ten files or ten thousand, each upload gets its own workflow execution.
@@ -60,12 +62,14 @@ I used Terraform rather than SAM or CDK because the rest of my infrastructure al
 
 The repo includes good and deliberately broken sample files and a demo script that runs the whole round trip. Against the live stack:
 
-| File | Result |
-|---|---|
-| `good_R1.fastq.gz` | ✅ **VALIDATED**: 200 reads, 75 bp, GC 49.75%, MD5 and SHA-256 recorded |
-| `good_tumour_normal.vcf` | ✅ **VALIDATED**: 4 variants, samples TUMOUR and NORMAL, 2 SNVs and 2 indels |
-| `bad_length_mismatch.fastq` | 🚫 **QUARANTINED**: "Record 6: sequence length 75 != quality length 70" |
-| `bad_corrupt.vcf.gz` | 🚫 **QUARANTINED**: "File is not valid gzip (corrupt or truncated)" |
+
+| File                        | Result                                                                      |
+| --------------------------- | --------------------------------------------------------------------------- |
+| `good_R1.fastq.gz`          | ✅ **VALIDATED**: 200 reads, 75 bp, GC 49.75%, MD5 and SHA-256 recorded      |
+| `good_tumour_normal.vcf`    | ✅ **VALIDATED**: 4 variants, samples TUMOUR and NORMAL, 2 SNVs and 2 indels |
+| `bad_length_mismatch.fastq` | 🚫 **QUARANTINED**: "Record 6: sequence length 75 != quality length 70"     |
+| `bad_corrupt.vcf.gz`        | 🚫 **QUARANTINED**: "File is not valid gzip (corrupt or truncated)"         |
+
 
 The rejection reasons are the point. "Record 6: sequence length 75 != quality length 70" tells a researcher exactly what to go and fix. "Pipeline failed" does not.
 
@@ -96,6 +100,6 @@ src/scripts/demo.sh samples/good_R1.fastq.gz NA-demo-01
 src/scripts/demo.sh samples/bad_length_mismatch.fastq
 ```
 
-Code: **[github.com/pharmlovex/seqdrop](https://github.com/pharmlovex/seqdrop)**
+Code: [**github.com/pharmlovex/seqdrop**](https://github.com/pharmlovex/seqdrop)
 
 *#serverless #stepfunctions #lambda #terraform #bioinformatics*
