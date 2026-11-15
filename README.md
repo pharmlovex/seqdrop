@@ -14,15 +14,15 @@ flowchart LR
     CU -->|presigned POST, size-limited| U
     U -->|upload file| S3[(S3 incoming/)]
     S3 -->|Object Created| EB[EventBridge rule]
-    EB --> SFN{{Step Functions: intake}}
-    SFN --> V[Lambda: validate + MD5/SHA-256]
-    V -->|valid| M[Lambda: extract_metadata]
-    M --> P[Lambda: move → validated/]
-    V -->|invalid| Q[Lambda: move → quarantine/]
-    SFN -->|status + metadata| DB
+    EB --> SFN{{"Step Functions: intake<br/>(see Workflow states)"}}
+    SFN -->|status, checksums, metadata| DB
     SFN --> SNS[SNS notification]
-    U -->|GET /samples/:id| API
+    U -->|GET /samples, /samples/:id| API
+    API --> GS[Lambda: get_sample / list_samples]
+    GS -->|read| DB
 ```
+
+The intake workflow validates each file, then moves it to `validated/` or `quarantine/` in the same bucket. Its states are shown below.
 
 ### Workflow states
 
