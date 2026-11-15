@@ -7,3 +7,4 @@ __pycache__/
 .pytest_cache/
 crash.log
 .DS_Store
+brag-output/work/

@@ -1,67 +1,64 @@
-#  SeqDrop: a serverless front door for sequencing data
+# SeqDrop: a serverless front door for sequencing data
 
-*Weekend Challenge: No Pipeline, No Problem. Seven serverless services (API Gateway, Lambda, S3, Step Functions, DynamoDB, EventBridge and SNS), one `terraform apply`, and nothing to manage afterwards.*
+*Weekend Challenge: No Pipeline, No Problem. I used seven serverless services (API Gateway, Lambda, S3, Step Functions, DynamoDB, EventBridge and SNS), deployed them with one `terraform apply`, and haven't had to touch a server since.*
 
 ## The problem
 
-In a research lab, sequencing files arrive from many places: core facilities, collaborators, public archives, someone's laptop. They are big, they are precious, and a fair number of them are subtly broken. A FASTQ file truncated mid-transfer still looks like a FASTQ file. A VCF with a mangled header might only fail three hours into an analysis pipeline, long after the person who uploaded it has gone home.
+Sequencing files turn up in a research lab from all over the place. Some come from the core facility, some from collaborators, some from public archives, and some from whoever had them on a laptop. They're large, they're hard to replace, and more of them are quietly broken than you'd hope. If a FASTQ gets cut off halfway through a transfer, it still looks like a FASTQ. A VCF with a mangled header can sail through until it kills an analysis pipeline three hours in, and by then whoever uploaded it has gone home.
 
-What I wanted was a front door: one place to drop a FASTQ or VCF that answers three questions immediately. **Is this file intact? What is in it? Where is it now?** Bad files should be set aside with a reason a human can act on, and good files should come back checksummed and catalogued. The intake step is bursty and idle most of the time, so I also wanted it to cost nothing between uploads. That made it a natural fit for serverless.
+I wanted a single place to drop a FASTQ or VCF and get three answers straight away: is the file intact, what's in it, and where did it end up? If it's bad, it should be set aside with a reason someone can actually act on. If it's good, it should come back with checksums and a catalogue entry. Uploads come in bursts with long quiet gaps in between, so I didn't want to pay for anything during the gaps. That pretty much decided it: serverless.
 
 ## What it does
 
-1. A researcher calls `POST /samples` with a filename and sample name. SeqDrop registers the sample in DynamoDB as `AWAITING_UPLOAD` and returns a **presigned S3 POST** with a size limit.
-2. The file is uploaded straight to S3 and never passes through Lambda or API Gateway.
-3. S3 emits an *Object Created* event, and an EventBridge rule starts a **Step Functions** workflow.
-4. The workflow validates the file, computes MD5 and SHA-256 in the same streaming pass, and extracts metadata. It then moves the file to `validated/` or `quarantine/`.
-5. The sample record is updated with status, checksums, metadata or rejection reason, and an SNS notification goes out.
-6. `GET /samples/{id}` returns the result, and `GET /samples?status=QUARANTINED` lists everything that needs attention.
-
+1. A researcher calls `POST /samples` with a filename and sample name. SeqDrop registers the sample in DynamoDB as `AWAITING_UPLOAD` and hands back a **presigned S3 POST** with a size limit baked in.
+2. The file goes straight to S3. It never touches Lambda or API Gateway.
+3. S3 emits an *Object Created* event, and an EventBridge rule kicks off a **Step Functions** workflow.
+4. The workflow validates the file, computing MD5 and SHA-256 while it reads, and pulls out metadata. Then it moves the file to either `validated/` or `quarantine/`.
+5. The sample record gets updated with its status, checksums, and either the metadata or the reason it was rejected. SNS sends a notification.
+6. `GET /samples/{id}` shows the result. `GET /samples?status=QUARANTINED` lists everything that needs someone to look at it.
 
 | Format           | Validation                                                                                                   | Metadata extracted                                                            |
 | ---------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
 | FASTQ / FASTQ.gz | 4-line records, `@`/`+` lines, valid bases, sequence length = quality length, Phred+33 range, gzip integrity | reads, total bases, read length min/max/mean, GC%, first read ID              |
 | VCF / VCF.gz     | `##fileformat=VCF`, 8 fixed `#CHROM` columns, consistent column count, integer POS, non-empty REF            | variant count, VCF version, sample names, chromosomes, SNV/indel/other counts |
 
-
 ## Architecture
 
 ![SeqDrop intake workflow in the Step Functions console](stepfunctions_graph.png)
 
-The workflow has two happy endings and one unhappy one:
+There are three ways out of the workflow:
 
 - **Valid file:** `Validate → ExtractMetadata → Promote → RecordValidated → NotifyValidated`
 - **Invalid file:** `Validate → Quarantine → RecordQuarantined → NotifyQuarantined`
-- **Unexpected error:** any task's `Catch` leads to `RecordError`, so the sample record always says what went wrong rather than sitting in `PROCESSING` forever.
+- **Something unexpected:** every task has a `Catch` that goes to `RecordError`. I didn't want samples stuck in `PROCESSING` forever with no explanation, so the record always says what went wrong.
 
 ## No pipeline, no problem
 
-There is nothing to run, patch or babysit. The whole stack (60 resources) goes up with a single `terraform apply` from a laptop, with no CI/CD pipeline, no containers and no instances. Once it's deployed:
+I don't have anything to run, patch or keep an eye on. All 60 resources go up with a single `terraform apply` from my laptop. There's no CI/CD pipeline, no containers and no instances. After it's deployed:
 
-- **Idle cost is effectively zero.** Lambda, Step Functions, API Gateway and pay-per-request DynamoDB bill only when a file arrives. Between uploads, the only cost is storage.
-- **Scaling is someone else's problem.** Ten files or ten thousand, each upload gets its own workflow execution.
-- **Every run is auditable.** Each sample record links to its Step Functions execution, so you can see exactly which state a file passed or failed.
+- **It costs next to nothing when idle.** Lambda, Step Functions, API Gateway and pay-per-request DynamoDB only bill when a file arrives. Between uploads I'm just paying for storage.
+- **I don't have to think about scale.** Each upload gets its own workflow execution, whether there are ten of them or ten thousand.
+- **I can trace any file.** Every sample record links to its Step Functions execution, so I can see which state a file got through and where it failed.
 
-I used Terraform rather than SAM or CDK because the rest of my infrastructure already lives there. The state machine is plain Amazon States Language in `infra/statemachine/intake.asl.json`, so it opens directly in Workflow Studio.
+I picked Terraform over SAM or CDK because the rest of my infrastructure is already in it. The state machine is plain Amazon States Language in `infra/statemachine/intake.asl.json`, which means you can open it straight in Workflow Studio.
 
 ## Design decisions I'd defend
 
-**Lambda only where code is needed.** Three Lambdas do the real work: validate, extract metadata and move the object. Every DynamoDB write and SNS publish is a **direct Step Functions service integration**. Even the sample ID is pulled out of the S3 key with intrinsic functions (`States.ArrayGetItem(States.StringSplit(...))`), with no Lambda involved. Fewer functions means less code, fewer cold starts and fewer IAM roles to get wrong.
+**Only use Lambda where I actually need code.** Three Lambdas do the real work: validating, extracting metadata and moving the object. Every DynamoDB write and SNS publish is a **direct Step Functions service integration** instead. I even pull the sample ID out of the S3 key with intrinsic functions (`States.ArrayGetItem(States.StringSplit(...))`) so I don't need a Lambda for it. Less code means fewer cold starts and fewer IAM roles I can get wrong.
 
-**Register before upload.** `MarkProcessing` is a conditional DynamoDB update that only succeeds if the sample was registered through the API. A file dropped into the bucket any other way fails that condition, and the `ConditionalCheckFailedException` is caught and routed to quarantine. The bucket can't be used as an anonymous drop box.
+**Files have to be registered before they're uploaded.** `MarkProcessing` is a conditional DynamoDB update, and it only succeeds if the sample came in through the API. If someone drops a file into the bucket any other way, the condition fails, and the workflow catches the `ConditionalCheckFailedException` and sends the file to quarantine. So nobody can use the bucket as an anonymous drop box.
 
-**Presigned POST, not PUT.** A POST policy can carry a `content-length-range` condition, so S3 itself rejects oversized uploads before a single byte is stored.
+**Presigned POST rather than PUT.** A POST policy can include a `content-length-range` condition, which means S3 turns away oversized uploads before it stores anything.
 
-**Streaming validation.** Files are read as a stream, and the checksums are computed in the same pass as validation. Memory use stays flat regardless of file size.
+**Validation streams the file.** It reads the file as a stream and works out the checksums on the same pass, so memory use stays flat however big the file is.
 
-**Least privilege, one role per function.** Each Lambda can touch only the S3 prefixes and actions it uses. The workflow role can invoke exactly three functions, update one table and publish to one topic.
+**One role per function, with as little access as possible.** Each Lambda can only touch the S3 prefixes and actions it uses. The workflow role can invoke exactly three functions, update one table and publish to one topic.
 
-**Cheap to leave running.** The stack uses pay-per-request DynamoDB, arm64 Lambdas, throttling on the public API stage (10 requests/s, burst 20), and S3 lifecycle rules that clear abandoned uploads after 7 days and quarantined files after 30.
+**It's cheap to leave running.** DynamoDB is pay-per-request, the Lambdas run on arm64, the public API stage is throttled (10 requests/s, burst 20), and S3 lifecycle rules clean up abandoned uploads after 7 days and quarantined files after 30.
 
-## It works
+## Does it work?
 
-The repo includes good and deliberately broken sample files and a demo script that runs the whole round trip. Against the live stack:
-
+The repo has some good sample files, some I broke on purpose, and a demo script that does the full round trip. Here's what I got against the live stack:
 
 | File                        | Result                                                                      |
 | --------------------------- | --------------------------------------------------------------------------- |
@@ -70,24 +67,23 @@ The repo includes good and deliberately broken sample files and a demo script th
 | `bad_length_mismatch.fastq` | 🚫 **QUARANTINED**: "Record 6: sequence length 75 != quality length 70"     |
 | `bad_corrupt.vcf.gz`        | 🚫 **QUARANTINED**: "File is not valid gzip (corrupt or truncated)"         |
 
-
-The rejection reasons are the point. "Record 6: sequence length 75 != quality length 70" tells a researcher exactly what to go and fix. "Pipeline failed" does not.
+The rejection messages are what I care about most here. "Record 6: sequence length 75 != quality length 70" tells a researcher exactly what to fix. "Pipeline failed" tells them nothing.
 
 ## What bit me
 
-**The 307 that wasn't in any tutorial.** My first live uploads failed with HTTP 307. boto3 had signed the presigned POST against the global `s3.amazonaws.com` endpoint. For a bucket outside us-east-1, and especially a newly created one, S3 answers that host with a temporary redirect, and clients don't re-send a multipart form across a redirect. The fix was a single client setting: sign against the regional endpoint `s3.<region>.amazonaws.com` with virtual-hosted addressing. It's worth knowing if you build anything with presigned uploads outside us-east-1.
+**A 307 I couldn't find in any tutorial.** My first real uploads failed with HTTP 307. It turned out boto3 had signed the presigned POST against the global `s3.amazonaws.com` endpoint. If your bucket is outside us-east-1, and especially if it's brand new, S3 responds to that host with a temporary redirect, and clients won't re-send a multipart form across a redirect. Fixing it took one client setting: sign against the regional endpoint `s3.<region>.amazonaws.com` and use virtual-hosted addressing. Worth remembering if you're doing presigned uploads anywhere other than us-east-1.
 
-**Provider deprecations.** AWS provider v6 deprecates `hash_key` and `range_key` on DynamoDB global secondary indexes in favour of `key_schema` blocks. It's a small change, but it's the kind of warning you want to clear before it becomes an error.
+**Provider deprecations.** AWS provider v6 deprecates `hash_key` and `range_key` on DynamoDB global secondary indexes and wants `key_schema` blocks instead. Not a big change, but I'd rather clear the warning now than wait for it to turn into an error.
 
-**Plan noise from `for_each`.** Building the workflow's IAM policy from `aws_lambda_function.fn[...].arn` means any code change to *any* Lambda in that `for_each` makes Terraform show the policy as "known after apply". The policy doesn't actually change, but it looks alarming in a plan. Building the ARNs from known names would avoid it.
+**Noisy plans from `for_each`.** I built the workflow's IAM policy from `aws_lambda_function.fn[...].arn`. The catch is that changing the code of *any* Lambda in that `for_each` makes Terraform mark the policy as "known after apply". The policy doesn't really change, but it looks worrying in a plan. Building the ARNs from known names would get rid of that.
 
 ## What's next
 
-- **Large files.** Lambda's 15-minute limit makes it the wrong tool for multi-gigabyte FASTQs. The plan is a size-based `Choice` state that hands big files to an ECS Fargate or AWS Batch task with the same input and output contract, inside the same state machine.
-- **Auth.** Add a Cognito JWT authoriser on the HTTP API and scope samples to projects.
-- **Deeper QC.** Add a FastQC or `bcftools stats` container step and store the report next to the file.
-- **Paired-end awareness.** Link R1 and R2 under one sample and check that their read counts match.
-- **Data protection.** Turn on DynamoDB deletion protection, Terraform `prevent_destroy`, and S3 versioning for anything holding real data.
+- **Large files.** Lambda's 15-minute limit rules it out for multi-gigabyte FASTQs. I plan to add a `Choice` state that checks the file size and sends big files to an ECS Fargate or AWS Batch task with the same inputs and outputs, all inside the same state machine.
+- **Auth.** A Cognito JWT authoriser on the HTTP API, with samples scoped to projects.
+- **Deeper QC.** A FastQC or `bcftools stats` container step, with the report stored alongside the file.
+- **Paired-end support.** Link R1 and R2 under one sample and check their read counts match.
+- **Data protection.** DynamoDB deletion protection, Terraform `prevent_destroy`, and S3 versioning for anything holding real data.
 
 ## Try it
 
