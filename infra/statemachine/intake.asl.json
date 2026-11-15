@@ -1,0 +1,242 @@
+{
+  "Comment": "SeqDrop intake: validate, catalogue and route an uploaded sequencing file (FASTQ/VCF).",
+  "StartAt": "ParseEvent",
+  "States": {
+    "ParseEvent": {
+      "Type": "Pass",
+      "Comment": "Reshape the EventBridge S3 event. Keys look like incoming/<sample_id>/<filename>.",
+      "Parameters": {
+        "bucket.$": "$.detail.bucket.name",
+        "key.$": "$.detail.object.key",
+        "size.$": "$.detail.object.size",
+        "sample_id.$": "States.ArrayGetItem(States.StringSplit($.detail.object.key, '/'), 1)",
+        "execution_arn.$": "$$.Execution.Id"
+      },
+      "Next": "MarkProcessing"
+    },
+
+    "MarkProcessing": {
+      "Type": "Task",
+      "Comment": "Only files that were registered through POST /samples are processed.",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${table_name}",
+        "Key": { "sample_id": { "S.$": "$.sample_id" } },
+        "ConditionExpression": "attribute_exists(sample_id)",
+        "UpdateExpression": "SET #status = :status, size_bytes = :size, execution_arn = :exec, updated_at = :now",
+        "ExpressionAttributeNames": { "#status": "status" },
+        "ExpressionAttributeValues": {
+          ":status": { "S": "PROCESSING" },
+          ":size": { "N.$": "States.Format('{}', $.size)" },
+          ":exec": { "S.$": "$.execution_arn" },
+          ":now": { "S.$": "$$.State.EnteredTime" }
+        }
+      },
+      "ResultPath": null,
+      "Catch": [
+        {
+          "ErrorEquals": ["DynamoDB.ConditionalCheckFailedException"],
+          "ResultPath": "$.error",
+          "Next": "Unregistered"
+        },
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "RecordError"
+        }
+      ],
+      "Next": "Validate"
+    },
+
+    "Unregistered": {
+      "Type": "Pass",
+      "Result": { "valid": false, "reason": "Upload has no matching sample registration" },
+      "ResultPath": "$.validation",
+      "Next": "Quarantine"
+    },
+
+    "Validate": {
+      "Type": "Task",
+      "Comment": "Check format integrity and compute MD5 + SHA-256 in one streaming pass.",
+      "Resource": "${validate_arn}",
+      "ResultPath": "$.validation",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordError" }],
+      "Next": "IsValid"
+    },
+
+    "IsValid": {
+      "Type": "Choice",
+      "Choices": [{ "Variable": "$.validation.valid", "BooleanEquals": true, "Next": "ExtractMetadata" }],
+      "Default": "Quarantine"
+    },
+
+    "ExtractMetadata": {
+      "Type": "Task",
+      "Comment": "FASTQ: reads, bases, length stats, GC%. VCF: variants, samples, chromosomes, SNV/indel split.",
+      "Resource": "${metadata_arn}",
+      "Parameters": {
+        "bucket.$": "$.bucket",
+        "key.$": "$.key",
+        "format.$": "$.validation.format"
+      },
+      "ResultPath": "$.metadata",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordError" }],
+      "Next": "Promote"
+    },
+
+    "Promote": {
+      "Type": "Task",
+      "Resource": "${move_arn}",
+      "Parameters": {
+        "bucket.$": "$.bucket",
+        "key.$": "$.key",
+        "dest_prefix": "validated"
+      },
+      "ResultPath": "$.moved",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordError" }],
+      "Next": "RecordValidated"
+    },
+
+    "RecordValidated": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${table_name}",
+        "Key": { "sample_id": { "S.$": "$.sample_id" } },
+        "UpdateExpression": "SET #status = :status, file_format = :fmt, md5 = :md5, sha256 = :sha, record_count = :n, metadata_json = :meta, s3_uri = :uri, updated_at = :now",
+        "ExpressionAttributeNames": { "#status": "status" },
+        "ExpressionAttributeValues": {
+          ":status": { "S": "VALIDATED" },
+          ":fmt": { "S.$": "$.validation.format" },
+          ":md5": { "S.$": "$.validation.md5" },
+          ":sha": { "S.$": "$.validation.sha256" },
+          ":n": { "N.$": "States.Format('{}', $.metadata.record_count)" },
+          ":meta": { "S.$": "States.JsonToString($.metadata)" },
+          ":uri": { "S.$": "$.moved.s3_uri" },
+          ":now": { "S.$": "$$.State.EnteredTime" }
+        }
+      },
+      "ResultPath": null,
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordError" }],
+      "Next": "NotifyValidated"
+    },
+
+    "NotifyValidated": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${topic_arn}",
+        "Subject": "SeqDrop: sample validated",
+        "Message.$": "States.Format('Sample {} passed validation ({}, {} records). Stored at {}. SHA-256 {}', $.sample_id, $.validation.format, $.metadata.record_count, $.moved.s3_uri, $.validation.sha256)"
+      },
+      "ResultPath": null,
+      "Next": "Validated"
+    },
+
+    "Validated": { "Type": "Succeed" },
+
+    "Quarantine": {
+      "Type": "Task",
+      "Resource": "${move_arn}",
+      "Parameters": {
+        "bucket.$": "$.bucket",
+        "key.$": "$.key",
+        "dest_prefix": "quarantine"
+      },
+      "ResultPath": "$.moved",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordError" }],
+      "Next": "RecordQuarantined"
+    },
+
+    "RecordQuarantined": {
+      "Type": "Task",
+      "Comment": "No condition here, so unregistered uploads are recorded too.",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${table_name}",
+        "Key": { "sample_id": { "S.$": "$.sample_id" } },
+        "UpdateExpression": "SET #status = :status, rejection_reason = :reason, s3_uri = :uri, updated_at = :now, created_at = if_not_exists(created_at, :now)",
+        "ExpressionAttributeNames": { "#status": "status" },
+        "ExpressionAttributeValues": {
+          ":status": { "S": "QUARANTINED" },
+          ":reason": { "S.$": "$.validation.reason" },
+          ":uri": { "S.$": "$.moved.s3_uri" },
+          ":now": { "S.$": "$$.State.EnteredTime" }
+        }
+      },
+      "ResultPath": null,
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordError" }],
+      "Next": "NotifyQuarantined"
+    },
+
+    "NotifyQuarantined": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${topic_arn}",
+        "Subject": "SeqDrop: sample quarantined",
+        "Message.$": "States.Format('Sample {} failed validation and was moved to {}. Reason: {}', $.sample_id, $.moved.s3_uri, $.validation.reason)"
+      },
+      "ResultPath": null,
+      "Next": "Quarantined"
+    },
+
+    "Quarantined": { "Type": "Succeed" },
+
+    "RecordError": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${table_name}",
+        "Key": { "sample_id": { "S.$": "$.sample_id" } },
+        "UpdateExpression": "SET #status = :status, error_info = :err, updated_at = :now, created_at = if_not_exists(created_at, :now)",
+        "ExpressionAttributeNames": { "#status": "status" },
+        "ExpressionAttributeValues": {
+          ":status": { "S": "ERROR" },
+          ":err": { "S.$": "States.JsonToString($.error)" },
+          ":now": { "S.$": "$$.State.EnteredTime" }
+        }
+      },
+      "ResultPath": null,
+      "Next": "Failed"
+    },
+
+    "Failed": {
+      "Type": "Fail",
+      "Error": "IntakeFailed",
+      "Cause": "An unexpected error occurred; see error_info on the sample record."
+    }
+  }
+}

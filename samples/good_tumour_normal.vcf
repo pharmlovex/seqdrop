@@ -1,0 +1,11 @@
+##fileformat=VCFv4.2
+##source=SeqDropDemo
+##contig=<ID=chr1,length=248956422>
+##contig=<ID=chr17,length=83257441>
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total depth">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	TUMOUR	NORMAL
+chr1	1014143	rs786201005	C	T	50	PASS	DP=40	GT	0/1	0/0
+chr1	1020172	.	G	GA	42	PASS	DP=35	GT	0/1	0/0
+chr17	7673803	rs121913343	G	A	99	PASS	DP=88	GT	0/1	0/0
+chr17	43045712	.	TC	T	60	PASS	DP=51	GT	1/1	0/1
