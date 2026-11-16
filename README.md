@@ -6,6 +6,8 @@ Built for the AWS Builder Center serverless weekend challenge with **API Gateway
 
 ## Architecture
 
+![SeqDrop client data flow: register, upload, process, query](docs/architecture.png)
+
 ```mermaid
 flowchart LR
     U[Researcher / client] -->|POST /samples| API[API Gateway HTTP API]
